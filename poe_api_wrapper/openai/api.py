@@ -9,6 +9,10 @@ from poe_api_wrapper.openai.type import *
 import orjson, asyncio, random, os, uuid
 from httpx import AsyncClient
 
+# 定义全局变量
+remaining_balance = 0
+current_conversation_cost = 0
+
 DIR = os.path.dirname(os.path.abspath(__file__))
 
 app = FastAPI(title="Poe API Wrapper", description="OpenAI Proxy Server")
@@ -213,20 +217,46 @@ async def message_handler(
 ) -> dict:
     
     try:
-        main_request = messages[-1]["content"]
+        system_message = ""
+        if messages[0]['role'] == 'system':
+            system_message = f"System: {messages[0]['content']}\n\n"
+            system_tokens = await helpers.__tokenize(system_message)
+            messages = messages[1:]  # 移除系统消息，稍后单独处理
+        else:
+            system_tokens = 0
 
-        full_string = await helpers.__stringify_messages(messages=messages)
+        # 反转剩余的消息列表，使最新的消息在前面
+        reversed_messages = list(reversed(messages))
+        included_messages = []
+        total_tokens = system_tokens  # 从系统消息的token数开始计算
         
-        history_string = await helpers.__stringify_messages(messages=messages[:-1])
+        for idx, msg in enumerate(reversed_messages):
+            msg_string = f"{msg['role'].capitalize()}: {msg['content']}\n\n"
+            msg_tokens = await helpers.__tokenize(msg_string)
+            
+            # 检查添加这条消息是否会超过token限制
+            if total_tokens + msg_tokens > tokensLimit:
+                break
+            
+            included_messages.append(msg_string)
+            total_tokens += msg_tokens
+        
+        # 再次反转消息列表，恢复原来的顺序
+        included_messages.reverse()
+        
+        # 分离最新的消息和历史消息
+        main_request = included_messages.pop()
+        history_string = system_message + ''.join(included_messages)
+        
+        message = f"Your current message context: \n{history_string}The most recent message: {main_request}\n"
+        
+        # 输出携带的历史信息数量（不包括系统消息）
+        history_count = len(included_messages)
+        print(f"携带了 {history_count} 条历史信息")
+        
+        print(f"当前tokens: {total_tokens}")
+        print(f"最大tokens: {tokensLimit}")
 
-        full_tokens = await helpers.__tokenize(full_string)
-        
-        if full_tokens > tokensLimit:
-            history_string = await helpers.__progressive_summarize_text(
-                history_string, tokensLimit - await helpers.__tokenize(main_request) - 100
-            )
-        
-        message = f"Your current message context: \n{history_string}\n\nThe most recent message: {main_request}\n\n"
         return {"bot": baseModel, "message": message}
     except Exception as e:
         raise HTTPException(detail={"error": {"message": f"Failed to process messages. Error: {e}", "type": "error", "param": None, "code": 400}}, status_code=400) from e
@@ -278,6 +308,7 @@ async def generate_chunks(
     client: AsyncPoeApi, response: dict, model: str, completion_id: str, 
     prompt_tokens: int, image_urls: list[str], max_tokens: int, include_usage:bool
 ) -> AsyncGenerator[bytes, None]:
+    global remaining_balance, current_conversation_cost  # 声明使用全局变量
     
     try:
         finish_reason = "stop"
@@ -297,6 +328,11 @@ async def generate_chunks(
             yield b"data: " + orjson.dumps(content) + b"\n\n"
             await asyncio.sleep(0.001)
             
+        current_conversation_cost = chunk['msgPrice']
+        remaining_balance -= current_conversation_cost
+        print(f"本次对话消耗积分: {current_conversation_cost}")
+        print(f"当前剩余额度（回复后）: {remaining_balance}")
+
         end_completion_data = await create_completion_data(completion_id=completion_id, 
                                                            model=model, 
                                                            finish_reason=finish_reason, 
@@ -362,11 +398,14 @@ async def non_streaming_response(
 
 
 async def rotate_token(tokens) -> tuple[AsyncPoeApi, bool]:
+    global remaining_balance  # 声明使用全局变量
     if len(tokens) == 0:
         raise HTTPException(detail={"error": {"message": "All tokens have been used. Please add more tokens.", "type": "error", "param": None, "code": 402}}, status_code=402)
     token = random.choice(tokens)
     client = await AsyncPoeApi(token).create()
     settings = await client.get_settings()
+    remaining_balance = settings["messagePointInfo"]["messagePointBalance"]
+    print(f"当前剩余额度（回复前）: {remaining_balance}")
     if settings["messagePointInfo"]["messagePointBalance"] <= 20:
         tokens.remove(token)
         return await rotate_token(tokens)
