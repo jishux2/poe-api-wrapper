@@ -23,8 +23,7 @@ from nltk.tokenize import sent_tokenize, word_tokenize
 import tiktoken
 
 async def __progressive_summarize_text(text, max_length, initial_reduction_ratio=0.8, step=0.1):
-    current_tokens = await __tokenize(text)
-    if current_tokens < max_length:
+    if len(text) < max_length:
         return text
     
     stop_words = set(stopwords.words("english"))
