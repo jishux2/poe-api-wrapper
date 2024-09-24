@@ -683,8 +683,6 @@ class AsyncPoeApi:
                             await asyncio.sleep(1)
                             continue
                         
-                    if not response["title"]:
-                        continue
                     yield response
                     break
                 
@@ -919,23 +917,17 @@ class AsyncPoeApi:
                         response["response"] = response["text"][len(last_text):]                        
                 
                 if response["state"] == "complete":    
-                    if len(response["followupActions"]) == 6:
-                        # 这是最后一条消息，处理建议回复
-                        if suggest_replies:
-                            suggestedReplies = [action["bodyText"] for action in response["followupActions"] if action.get("titleText") is None]
-
-                        yield response
-                        break  # 结束循环
-                    elif suggest_replies:
-                        # 这不是最后一条消息，但我们仍然需要处理可能的建议回复
-                        if suggest_attempts > 0:
-                            suggestedReplies = [action["bodyText"] for action in response["followupActions"] if action.get("titleText") is None]
-                            suggest_attempts -= 1
+                    if suggest_replies:
+                            
+                        if suggest_attempts > 0 and len(response["followupActions"]) <= 4:
+                            actions = response["followupActions"]
+                            suggestedReplies = [action["bodyText"] for action in actions]
+                            suggest_attempts -= 1     
                             await asyncio.sleep(1)
                             continue
                         
-                    # 如果不是最后一条消息，也不需要处理建议回复，就继续循环
-                    continue
+                    yield response
+                    break
 
                 
                 yield response
