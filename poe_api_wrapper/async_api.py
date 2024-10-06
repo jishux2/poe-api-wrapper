@@ -718,7 +718,7 @@ class AsyncPoeApi:
         else:
             apiPath = 'gql_upload_POST'
             file_form, file_size = generate_file(file_path, self.proxies)
-            if file_size > 50000000:
+            if file_size > 350000000:
                 raise RuntimeError("File size too large. Please try again with a smaller file.")
             for i in range(len(file_form)):
                 attachments.append(f'file{i}')
@@ -1164,7 +1164,7 @@ class AsyncPoeApi:
         if file_path != []:
             for path in file_path:
                 file_form, file_size = generate_file([path], self.proxies)
-                if file_size > 50000000:
+                if file_size > 350000000:
                     raise RuntimeError("File size too large. Please try again with a smaller file.")
                 response = await self.send_request('gql_upload_POST', 'Knowledge_CreateKnowledgeSourceMutation', {"sourceInput":{"file_upload":{"attachment":"file"}}}, file_form, knowledge=True)
                 if response['data']['knowledgeSourceCreate']['status'] != 'success':
