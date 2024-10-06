@@ -35,6 +35,7 @@ SubscriptionsMutation = {
 
 BOTS_LIST = {
     'Assistant': 'capybara',
+    'Claude-3.5-Sonnet': 'claude_3_igloo',
     'Claude-3-Opus': 'claude_2_1_cedar',
     'Claude-3-Sonnet': 'claude_2_1_bamboo',
     'Claude-3-Haiku': 'claude_3_haiku',

@@ -692,6 +692,13 @@ class PoeApi:
             for i in range(len(file_form)):
                 attachments.append(f'file{i}')
         
+        botInfo = self.get_botInfo(bot)
+        msgPrice = botInfo.get('displayMessagePointPrice')
+        if not botInfo:
+            raise ValueError(
+                f"Failed to get bot info for {bot}. Make sure the bot exists before creating new chat."
+            )
+        
         if (chatId == None and chatCode == None):
             try:
                 variables = {
@@ -707,22 +714,6 @@ class PoeApi:
                                 "messagePointsDisplayPrice": msgPrice
                             }
                 message_data = self.send_request(apiPath, 'SendMessageMutation', variables, file_form)
-                
-                if message_data["data"] != None and message_data["data"]["messageEdgeCreate"]["status"] == "message_points_display_price_mismatch":
-                    msgPrice = message_data["data"]["messageEdgeCreate"]["bot"]["messagePointLimit"]["displayMessagePointPrice"]
-                    variables = {
-                                    "chatId": None, 
-                                    "bot": bot,
-                                    "query":message, 
-                                    "shouldFetchChat": True, 
-                                    "source":{"sourceType":"chat_input","chatInputMetadata":{"useVoiceRecord":False,}}, 
-                                    "clientNonce": generate_nonce(),
-                                    "sdid":"",
-                                    "attachments":attachments, 
-                                    "existingMessageAttachmentsIds":[],
-                                    "messagePointsDisplayPrice": msgPrice
-                                }
-                    message_data = self.send_request(apiPath, 'SendMessageMutation', variables, file_form)
         
                 if message_data["data"] == None and message_data["errors"]:
                     raise ValueError(
@@ -782,21 +773,6 @@ class PoeApi:
             
             try:
                 message_data = self.send_request(apiPath, 'SendMessageMutation', variables, file_form)
-                if message_data["data"] != None and message_data["data"]["messageEdgeCreate"]["status"] == "message_points_display_price_mismatch":
-                    msgPrice = message_data["data"]["messageEdgeCreate"]["bot"]["messagePointLimit"]["displayMessagePointPrice"]
-                    variables = {
-                                    "chatId": chatId, 
-                                    "bot": bot,
-                                    "query":message, 
-                                    "shouldFetchChat": True, 
-                                    "source":{"sourceType":"chat_input","chatInputMetadata":{"useVoiceRecord":False,}}, 
-                                    "clientNonce": generate_nonce(),
-                                    "sdid":"",
-                                    "attachments":attachments, 
-                                    "existingMessageAttachmentsIds":[],
-                                    "messagePointsDisplayPrice": msgPrice
-                                }
-                    message_data = self.send_request(apiPath, 'SendMessageMutation', variables, file_form)
                     
                 if message_data["data"] == None and message_data["errors"]:
                     raise RuntimeError(f"An unknown error occurred. Raw response data: {message_data}")
