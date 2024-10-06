@@ -617,7 +617,7 @@ class AsyncPoeApi:
 
         last_text = ""        
         stateChange = False
-        suggest_attempts = 4
+        suggest_attempts = 6
         response = {}
         suggestedReplies = []
         
@@ -676,7 +676,7 @@ class AsyncPoeApi:
                 
                 if response["state"] == "complete":
                     if suggest_replies:
-                        if suggest_attempts > 0 and len(response["followupActions"]) <= 4:
+                        if suggest_attempts > 0 and len(response["followupActions"]) <= 6:
                             actions = response["followupActions"]
                             suggestedReplies = [action["bodyText"] for action in actions]
                             suggest_attempts -= 1     
@@ -919,7 +919,7 @@ class AsyncPoeApi:
                 if response["state"] == "complete":    
                     if suggest_replies:
                             
-                        if suggest_attempts > 0 and len(response["followupActions"]) <= 4:
+                        if suggest_attempts > 0 and len(response["followupActions"]) <= 6:
                             actions = response["followupActions"]
                             suggestedReplies = [action["bodyText"] for action in actions]
                             suggest_attempts -= 1     
