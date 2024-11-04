@@ -129,7 +129,7 @@ class AsyncPoeApi:
     async def send_request(self, path: str, query_name: str="", variables: dict={}, file_form: list=[], knowledge: bool=False, ratelimit: int = 0):
         if ratelimit > 0:
             logger.warning(f"Waiting queue {ratelimit}/2 to avoid rate limit")
-            asyncio.sleep(random.randint(2, 3))
+            await asyncio.sleep(random.randint(2, 3))
         status_code = 0
         
         try:
@@ -156,6 +156,17 @@ class AsyncPoeApi:
             response = await self.client.post(f'{self.BASE_URL}/api/{path}', data=payload, headers=headers, follow_redirects=True, timeout=30)
             
             status_code = response.status_code
+
+            if status_code == 403:
+                if ratelimit < 2:
+                    logger.warning(f"Received 403 status code, retrying... (attempt {ratelimit + 1}/2)")
+                    return await self.send_request(path, query_name, variables, file_form, ratelimit=ratelimit + 1)
+                else:
+                    raise Exception(f"Max retries reached after receiving 403 status code")
+
+            if not response.text:
+                raise Exception(f"Empty response with status code {status_code}")
+
             json_data = orjson.loads(response.text)
 
             if (
