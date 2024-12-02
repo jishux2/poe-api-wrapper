@@ -7,14 +7,14 @@ def is_using_proxy(address, port):
     except Exception as e:
         return False
 
-if is_using_proxy("127.0.0.1", "7890"):
+if is_using_proxy("127.0.0.1", "10809"):
     print("""
         3rd party proxy client detected. 
         Updating environment variables ...
         """)
 
-    os.environ["http_proxy"] = "http://127.0.0.1:7890"
-    os.environ["https_proxy"] = "http://127.0.0.1:7890"
+    os.environ["http_proxy"] = "http://127.0.0.1:10809"
+    os.environ["https_proxy"] = "http://127.0.0.1:10809"
 
 from .api import PoeApi
 from .async_api import AsyncPoeApi

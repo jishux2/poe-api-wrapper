@@ -1,24 +1,23 @@
+import ballyregan
+
 try:
-    from ballyregan import ProxyFetcher
-    from ballyregan.models import Protocols, Anonymities
+    from ballyregan.models import Protocols
+
     PROXY = True
-except ImportError as e:
-    print(f"Skipping ProxyFetcher due to {e}.")
+except:
     PROXY = False
 
 if PROXY:
+
     def fetch_proxy():
-        fetcher = ProxyFetcher()
-        try:
-            proxies = fetcher.get(
-            limit=10,
-            protocols=[Protocols.HTTP],
-            anonymities=[Anonymities.ANONYMOUS],
-            )
-        except:
-            print("No Anonymous proxies found. Switching to normal proxies ...") 
-            proxies = fetcher.get(
-            limit=10,
-            protocols=[Protocols.HTTP],
-            )
-        return [{'http://': f'http://{proxy.ip}:{proxy.port}'} for proxy in proxies]
+        http = ballyregan.Proxy(
+            ip="127.0.0.1",
+            port="10809",
+            protocol=Protocols.HTTP,
+        )
+        https = ballyregan.Proxy(
+            ip="127.0.0.1",
+            port="10809",
+            protocol=Protocols.HTTPS,
+        )
+        return [http, https]
