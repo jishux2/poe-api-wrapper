@@ -22,6 +22,10 @@ from nltk.stem import PorterStemmer
 from nltk.tokenize import sent_tokenize, word_tokenize
 import tiktoken
 
+import os
+import json
+from typing import Optional
+
 async def __progressive_summarize_text(text, max_length, initial_reduction_ratio=0.8, step=0.1):
     current_tokens = await __tokenize(text)
     if current_tokens < max_length:
@@ -102,3 +106,97 @@ async def __tokenize(text):
 
 async def __stringify_messages(messages):
     return '\n'.join(f"{message['role'].capitalize()}: {message['content']}" for message in messages)
+
+async def __handle_conversation_state(messages: list[dict[str, str]], last_response: str = None, chat_info: dict = None, client_id: str = None) -> tuple[Optional[int], Optional[str], bool]:
+    """处理会话状态，返回chatId、chatCode和是否继续会话的标志
+    
+    当chat_info为None时为查询模式，此时检查会话是否过期并尝试查找匹配的会话
+    当chat_info不为None时为保存模式，此时更新或添加会话信息
+    """
+    conversation_file = "conversation_state.json"
+    max_age_minutes = 5
+    current_time = time.time()
+    
+    try:
+        # 读取现有会话列表
+        conversations = []
+        if os.path.exists(conversation_file):
+            with open(conversation_file, "r", encoding="utf-8") as f:
+                conversations = json.load(f)
+        
+        # 查询模式：检查是否存在匹配的未过期会话
+        if chat_info is None:
+            if not messages or not client_id:
+                return None, None, False
+                
+            # 清理过期会话并查找匹配的会话
+            updated_conversations = []
+            matching_conversation = None
+            
+            for conv in conversations:
+                # 检查会话是否过期
+                if (current_time - conv["timestamp"]) / 60 > max_age_minutes:
+                    continue
+                    
+                # 检查是否匹配当前会话
+                if (messages[:-1] == conv["context"] and 
+                    client_id == conv.get("client_id")):
+                    matching_conversation = conv
+                
+                updated_conversations.append(conv)
+            
+            # 保存清理后的会话列表
+            with open(conversation_file, "w", encoding="utf-8") as f:
+                json.dump(updated_conversations, f, ensure_ascii=False, indent=2)
+                
+            if matching_conversation:
+                return (
+                    matching_conversation.get("chatId"),
+                    matching_conversation.get("chatCode"),
+                    True
+                )
+            return None, None, False
+            
+        # 保存模式：更新现有会话或添加新会话
+        else:
+            if not client_id:
+                return None, None, False
+                
+            # 构建新的上下文
+            full_context = messages.copy()
+            if last_response:
+                full_context.append({
+                    "role": "assistant",
+                    "content": last_response
+                })
+            
+            # 查找是否有匹配的会话需要更新
+            found = False
+            for conv in conversations:
+                if (conv.get("chatId") == chat_info.get("chatId") and 
+                    conv.get("chatCode") == chat_info.get("chatCode")):
+                    conv["context"] = full_context
+                    conv["timestamp"] = current_time
+                    found = True
+                    break
+            
+            # 如果没找到匹配的会话，添加新会话
+            if not found:
+                new_conversation = {
+                    "context": full_context,
+                    "chatId": chat_info.get("chatId"),
+                    "chatCode": chat_info.get("chatCode"),
+                    "timestamp": current_time,
+                    "client_id": client_id
+                }
+                conversations.append(new_conversation)
+            
+            # 保存更新后的会话列表
+            with open(conversation_file, "w", encoding="utf-8") as f:
+                json.dump(conversations, f, ensure_ascii=False, indent=2)
+                
+            return None, None, False
+            
+    except Exception as e:
+        print(f"处理会话状态时出错: {e}")
+        return None, None, False

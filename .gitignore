@@ -7,3 +7,4 @@ playground/
 examples/
 langchain/
 Dockerfile
+conversation_state.json

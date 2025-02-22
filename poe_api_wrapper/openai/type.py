@@ -11,6 +11,7 @@ class ChatData(BaseModel):
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
     stream_options: Optional[dict[str, Any]] = None
+    enable_conversation_tracking: bool = False  # 新添加的控制变量
     
 class ImagesGenData(BaseModel):
     prompt: Any

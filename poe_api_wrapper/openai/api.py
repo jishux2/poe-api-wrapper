@@ -8,6 +8,7 @@ from poe_api_wrapper.openai import helpers
 from poe_api_wrapper.openai.type import *
 import orjson, asyncio, random, os, uuid
 from httpx import AsyncClient
+import json
 
 # 定义全局变量
 remaining_balance = 0
@@ -51,7 +52,9 @@ async def list_models(request: Request, model: str = None) -> ORJSONResponse:
 @app.api_route("/chat/completions", methods=["POST", "OPTIONS"], response_model=None)
 @app.api_route("/v1/chat/completions", methods=["POST", "OPTIONS"], response_model=None)
 async def chat_completions(request: Request, data: ChatData) -> Union[StreamingResponse, ORJSONResponse]:
-    messages, model, streaming, max_tokens, stream_options = data.messages, data.model, data.stream, data.max_tokens, data.stream_options
+    messages, model, streaming = data.messages, data.model, data.stream
+    max_tokens, stream_options = data.max_tokens, data.stream_options
+    enable_tracking = data.enable_conversation_tracking  # 获取控制变量
 
     # Validate messages format
     if not await helpers.__validate_messages_format(messages):
@@ -63,19 +66,20 @@ async def chat_completions(request: Request, data: ChatData) -> Union[StreamingR
     include_usage = stream_options.get("include_usage", False) if stream_options else False
     
     modelData = app.state.models[model]
-    baseModel, tokensLimit, endpoints, premiumModel = modelData["baseModel"], modelData["tokens"], modelData["endpoints"], modelData["premium_model"]
+    baseModel, tokensLimit = modelData["baseModel"], modelData["tokens"]
+    endpoints, premiumModel = modelData["endpoints"], modelData["premium_model"]
     
     if "/v1/chat/completions" not in endpoints:
         raise HTTPException(detail={"error": {"message": "This model does not support chat completions.", "type": "error", "param": None, "code": 400}}, status_code=400)
     
-    client, subscription = await rotate_token(app.state.tokens)
+    client, subscription, client_id = await rotate_token(app.state.tokens)
     
     if premiumModel and not subscription:
         raise HTTPException(detail={"error": {"message": "Premium model requires a subscription.", "type": "error", "param": None, "code": 402}}, status_code=402)
     
     text_messages, image_urls = await helpers.__split_content(messages)
     
-    response = await message_handler(baseModel, text_messages, tokensLimit)
+    response = await message_handler(baseModel, text_messages, tokensLimit, enable_tracking, client_id)
     prompt_tokens = await helpers.__tokenize(''.join([str(message) for message in response["message"]]))
     if max_tokens and sum((max_tokens, prompt_tokens)) > app.state.models[model]["tokens"]:
         raise HTTPException(detail={"error": {
@@ -87,7 +91,7 @@ async def chat_completions(request: Request, data: ChatData) -> Union[StreamingR
             
     completion_id = await helpers.__generate_completion_id()
     
-    return await streaming_response(client, response, model, completion_id, prompt_tokens, image_urls, max_tokens, include_usage) \
+    return await streaming_response(client, response, model, completion_id, prompt_tokens, image_urls, max_tokens, include_usage, text_messages, enable_tracking, client_id) \
         if streaming else await non_streaming_response(client, response, model, completion_id, prompt_tokens, image_urls, max_tokens)
 
 
@@ -213,47 +217,58 @@ async def image_handler(baseModel: str, prompt: str, tokensLimit: int) -> dict:
    
    
 async def message_handler(
-    baseModel: str, messages: list[dict[str, str]], tokensLimit: int
+    baseModel: str, messages: list[dict[str, str]], tokensLimit: int, 
+    enable_tracking: bool = False, client_id: str = None
 ) -> dict:
-    
     try:
+        # 如果启用了会话追踪，先检查是否需要继续之前的会话
+        chat_id = None
+        chat_code = None
+        continue_conversation = False
+        
+        if enable_tracking:
+            chat_id, chat_code, continue_conversation = await helpers.__handle_conversation_state(messages=messages, client_id=client_id)
+        
+        if continue_conversation:
+            # 直接使用最新的消息
+            main_request = messages[-1]['content']
+            return {
+                "bot": baseModel,
+                "message": main_request,
+                "chatId": chat_id,
+                "chatCode": chat_code
+            }
+        
+        # 原有的处理逻辑
         system_message = ""
         if messages[0]['role'] == 'system':
             system_message = f"System: {messages[0]['content']}\n\n"
             system_tokens = await helpers.__tokenize(system_message)
-            messages = messages[1:]  # 移除系统消息，稍后单独处理
+            messages = messages[1:]
         else:
             system_tokens = 0
 
-        # 反转剩余的消息列表，使最新的消息在前面
         reversed_messages = list(reversed(messages))
         included_messages = []
-        total_tokens = system_tokens  # 从系统消息的token数开始计算
+        total_tokens = system_tokens
         
         for idx, msg in enumerate(reversed_messages):
             msg_string = f"{msg['role'].capitalize()}: {msg['content']}\n\n"
             msg_tokens = await helpers.__tokenize(msg_string)
             
-            # 检查添加这条消息是否会超过token限制
             if total_tokens + msg_tokens > tokensLimit:
                 break
             
             included_messages.append(msg_string)
             total_tokens += msg_tokens
         
-        # 再次反转消息列表，恢复原来的顺序
         included_messages.reverse()
-        
-        # 分离最新的消息和历史消息
         main_request = included_messages.pop()
         history_string = system_message + ''.join(included_messages)
-        
         message = f"Your current message context: \n{history_string}The most recent message: {main_request}\n"
         
-        # 输出携带的历史信息数量（不包括系统消息）
         history_count = len(included_messages)
         print(f"携带了 {history_count} 条历史信息")
-        
         print(f"当前tokens: {total_tokens}")
         print(f"最大tokens: {tokensLimit}")
 
@@ -306,13 +321,32 @@ async def create_completion_data(
     
 async def generate_chunks(
     client: AsyncPoeApi, response: dict, model: str, completion_id: str, 
-    prompt_tokens: int, image_urls: list[str], max_tokens: int, include_usage:bool
+    prompt_tokens: int, image_urls: list[str], max_tokens: int, include_usage: bool,
+    messages: list[dict[str, str]], enable_tracking: bool = False, client_id: str = None
 ) -> AsyncGenerator[bytes, None]:
-    global remaining_balance, current_conversation_cost  # 声明使用全局变量
+    global remaining_balance, current_conversation_cost
+
+    chat_id = response.get("chatId")
+    chat_code = response.get("chatCode")
+    last_chunk_text = ""  # 用于保存最后一个chunk的文本
     
     try:
         finish_reason = "stop"
-        async for chunk in client.send_message(bot=response["bot"], message=response["message"], file_path=image_urls):
+        initial_balance = remaining_balance
+        
+        send_message_kwargs = {
+            "bot": response["bot"],
+            "message": response["message"],
+            "file_path": image_urls
+        }
+        
+        if chat_id and chat_code:
+            send_message_kwargs.update({
+                "chatId": chat_id,
+                "chatCode": chat_code
+            })
+        
+        async for chunk in client.send_message(**send_message_kwargs):
             chunk_token = await helpers.__tokenize(chunk["text"])
             
             if max_tokens and chunk_token >= max_tokens:
@@ -320,28 +354,54 @@ async def generate_chunks(
                 finish_reason = "length"
                 break
             
-            content = await create_completion_data(completion_id=completion_id, 
-                                                   model=model, 
-                                                   chunk=chunk["response"], 
-                                                   include_usage=include_usage)
+            content = await create_completion_data(
+                completion_id=completion_id,
+                model=model,
+                chunk=chunk["response"],
+                include_usage=include_usage
+            )
             
             yield b"data: " + orjson.dumps(content) + b"\n\n"
             await asyncio.sleep(0.001)
             
-        current_conversation_cost = chunk['msgPrice']
-        remaining_balance -= current_conversation_cost
+            if not chat_id:  # 如果是新会话，保存chat_id
+                chat_id = chunk["chatId"]
+                chat_code = chunk.get("chatCode")
+        
+        if enable_tracking:
+            last_chunk_text = chunk["text"]  # 获取最后一个chunk的文本
+            await helpers.__handle_conversation_state(
+                messages,
+                last_chunk_text,  # 使用最后一个chunk的文本作为assistant的回复
+                {"chatId": chat_id, "chatCode": chat_code},
+                client_id  # 传入client_id
+            )
+        
+        # 重新获取剩余额度
+        settings = await client.get_settings()
+        remaining_balance = settings["messagePointInfo"]["messagePointBalance"]
+        current_conversation_cost = initial_balance - remaining_balance
         print(f"本次对话消耗积分: {current_conversation_cost}")
         print(f"当前剩余额度（回复后）: {remaining_balance}")
 
-        end_completion_data = await create_completion_data(completion_id=completion_id, 
-                                                           model=model, 
-                                                           finish_reason=finish_reason, 
-                                                           include_usage=include_usage, 
-                                                           prompt_tokens=prompt_tokens, 
-                                                           completion_tokens=chunk_token)
+        end_completion_data = await create_completion_data(
+            completion_id=completion_id,
+            model=model,
+            finish_reason=finish_reason,
+            include_usage=include_usage,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=chunk_token
+        )
         
-        yield b"data: " +  orjson.dumps(end_completion_data) + b"\n\n"
+        yield b"data: " + orjson.dumps(end_completion_data) + b"\n\n"
         yield b"data: [DONE]\n\n"
+
+        if chat_id is not None:
+            try:
+                await client.set_context_optimization(chat_id=chat_id, enabled=False)
+                print(f"已关闭对话{chat_id}的自动管理上下文")
+            except Exception as e:
+                print(f"关闭自动管理上下文失败: {e}")
     except GeneratorExit:
         pass
     except Exception as e:
@@ -350,10 +410,11 @@ async def generate_chunks(
     
 async def streaming_response(
     client: AsyncPoeApi, response: dict, model: str, completion_id: str, 
-    prompt_tokens: int, image_urls: list[str], max_tokens: int, include_usage: bool
+    prompt_tokens: int, image_urls: list[str], max_tokens: int, include_usage: bool, 
+    text_messages: list, enable_tracking: bool, client_id: str
 ) -> StreamingResponse:
     
-    return StreamingResponse(content=generate_chunks(client, response, model, completion_id, prompt_tokens, image_urls, max_tokens, include_usage), status_code=200, 
+    return StreamingResponse(content=generate_chunks(client, response, model, completion_id, prompt_tokens, image_urls, max_tokens, include_usage, text_messages, enable_tracking, client_id), status_code=200, 
                              headers={"X-Request-ID": str(uuid.uuid4()), "Content-Type": "text/event-stream"})
 
 
@@ -397,20 +458,23 @@ async def non_streaming_response(
     return ORJSONResponse(content.dict())
 
 
-async def rotate_token(tokens) -> tuple[AsyncPoeApi, bool]:
+async def rotate_token(tokens) -> tuple[AsyncPoeApi, bool, str]:
     global remaining_balance  # 声明使用全局变量
     if len(tokens) == 0:
         raise HTTPException(detail={"error": {"message": "All tokens have been used. Please add more tokens.", "type": "error", "param": None, "code": 402}}, status_code=402)
     token = random.choice(tokens)
     client = await AsyncPoeApi(token).create()
     settings = await client.get_settings()
+    with open("data/settings.json", "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
     remaining_balance = settings["messagePointInfo"]["messagePointBalance"]
     print(f"当前剩余额度（回复前）: {remaining_balance}")
     if settings["messagePointInfo"]["messagePointBalance"] <= 20:
         tokens.remove(token)
         return await rotate_token(tokens)
     subscriptions = settings["subscription"]["isActive"]
-    return client, subscriptions
+    client_id = settings["subscription"]["id"]
+    return client, subscriptions, client_id
 
 
 if __name__ == "__main__":
