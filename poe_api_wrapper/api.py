@@ -1672,3 +1672,24 @@ class PoeApi:
                     
         if autosave:
             self.save_group_history(group_name)
+
+    def set_context_optimization(self, chat_id: int, enabled: bool) -> dict:
+        """设置对话的自动管理上下文开关
+
+        Args:
+            chat_id: 对话ID
+            enabled: 是否启用自动管理上下文
+
+        Returns:
+            API响应的json数据
+        """
+        variables = {
+            "chatId": chat_id,
+            "isContextOptimizationOn": enabled
+        }
+        
+        return self.send_request(
+            path="gql_POST",
+            query_name="ChatSettingsModal_ChatSetContextOptimization_Mutation",
+            variables=variables
+        )
