@@ -172,7 +172,7 @@ poe -b P-B_HERE -lat P-LAT_HERE -f FORMKEY_HERE
 ### Available Default Bots
 | Display Name            | Model                     | Token Limit | Words | Access Type                                                     |
 | ----------------------- | ------------------------- | ----------- | ----- | --------------------------------------------------------------- |
-| Assistant               | capybara                  | 4K          | 3K    | ![Free](https://img.shields.io/badge/free-2feb7a)               |
+| Assistant               | capybara                  | 200K        | 150K  | ![Free](https://img.shields.io/badge/free-2feb7a)               |
 | Claude-3.5-Sonnet       | claude_3_igloo            | 4K          | 3K    | ![Free](https://img.shields.io/badge/free-2feb7a)               |
 | Claude-3-Opus           | claude_2_1_cedar          | 4K          | 3K    | ![Subscriber](https://img.shields.io/badge/subscriber-fc4747)   |
 | Claude-3-Sonnet         | claude_2_1_bamboo         | 4K          | 3K    | ![Free](https://img.shields.io/badge/free-2feb7a)               |

@@ -181,7 +181,7 @@
 
     "claude-3.5-sonnet": {
         "baseModel": "claude_3_igloo",
-        "tokens": 4000,
+        "tokens": 200000,
         "endpoints": ["/v1/chat/completions"],
         "premium_model": false,
         "object": "model",
