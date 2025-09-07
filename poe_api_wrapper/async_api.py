@@ -37,8 +37,10 @@ class AsyncPoeApi:
     
     def __init__(self, tokens: dict={}, proxy: list=[], auto_proxy: bool=False):
         self.client = None
-        if not {'p-b', 'p-lat'}.issubset(tokens):
-            raise ValueError("Please provide valid p-b and p-lat cookies")
+        # 检查新旧两种认证方式是否至少有一组
+        if not ({'p-b', 'p-lat'}.issubset(tokens) or 
+                {'p-b', 'poe-tchannel-channel'}.issubset(tokens)):
+            raise ValueError("Please provide either p-b + p-lat or p-b + poe-tchannel-channel")
         
         self.proxy: list = proxy
         self.auto_proxy: bool = auto_proxy
@@ -58,10 +60,17 @@ class AsyncPoeApi:
         self.loop: asyncio.AbstractEventLoop = None
         
         self.client = AsyncClient(headers=self.HEADERS, timeout=60, http2=True)
-        self.client.cookies.update({
-                                'p-b': self.tokens['p-b'], 
-                                'p-lat': self.tokens['p-lat']
-                                })
+        # 优先使用新的认证方式
+        if 'poe-tchannel-channel' in tokens:
+            self.client.cookies.update({
+                'p-b': tokens['p-b'],
+                'poe-tchannel-channel': tokens['poe-tchannel-channel']
+            })
+        else:
+            self.client.cookies.update({
+                'p-b': tokens['p-b'],
+                'p-lat': tokens['p-lat']
+            })
         
           
         if { '__cf_bm', 'cf_clearance'}.issubset(tokens):
@@ -76,6 +85,11 @@ class AsyncPoeApi:
                 'Poe-Formkey': self.formkey,
             })
         
+        if 'revision' in tokens:  # 新增对revision的处理
+            self.client.headers.update({
+                'Poe-Revision': tokens['revision']
+            })
+
     async def create(self):
         await self.load_bundle()
         
@@ -98,13 +112,22 @@ class AsyncPoeApi:
         try:
             webData = await self.client.get(self.BASE_URL)
             self.bundle = PoeBundle(webData.text)
+            
+            # 获取formkey
             self.formkey = self.bundle.get_form_key()
+            
+            # 获取revision
+            revision = self.bundle.get_revision()
+            
+            # 更新请求头
             self.client.headers.update({
                 'Poe-Formkey': self.formkey,
+                'Poe-Revision': revision
             })
+            
         except Exception as e:
             logger.error(f"Failed to load bundle. Reason: {e}")
-            logger.warning("Failed to get formkey from bundle. Please provide a valid formkey manually." if self.formkey == "" else "Continuing with provided formkey")
+            logger.warning("Failed to get formkey/revision from bundle. Please provide valid values manually." if self.formkey == "" else "Continuing with provided formkey")
         
     async def select_proxy(self, proxy: list, auto_proxy: bool=False):
         if proxy == [] and auto_proxy == True:

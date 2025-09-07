@@ -8,11 +8,13 @@ class PoeBundle:
     form_key_pattern = r"window\.([a-zA-Z0-9]+)=function\(\)\{return window"
     window_secret_pattern = r'let useFormkeyDecode=[\s\S]*?(window\.[\w]+="[^"]+")'
     static_pattern = r'static[^"]*\.js'
+    revision_pattern = r'"poe-revision":\s*"([a-f0-9]{40})"'
 
     def __init__(self, document: str):
         self._window = "const window={document:{hack:1},navigator:{userAgent:'safari <3'}};"
         self._src_scripts = []
         self._webpack_script: str = None
+        self._revision: str = None
 
         self.init_window(document)
 
@@ -42,10 +44,17 @@ class PoeBundle:
 
     def init_app(self, src: str):
         script = self.load_src_script(src)
+        
+        # 获取window secret
         if not (window_secret_match := re.search(self.window_secret_pattern, script)):
             raise RuntimeError("Failed to find window secret in js scripts")
-        
         self._window += window_secret_match.group(1) + ';'
+        
+        # 获取revision
+        if not (revision_match := re.search(self.revision_pattern, script)):
+            raise RuntimeError("Failed to find poe-revision in app script")
+        self._revision = revision_match.group(1)
+        logger.info(f"Retrieved poe-revision successfully: {self._revision}")
 
     def extend_src_scripts(self, manifest_src: str):
         # extend src scripts list with static scripts from manifest
@@ -56,6 +65,11 @@ class PoeBundle:
         scr_list = [f"{static_main_url}{match}" for match in matches]
 
         self._src_scripts.extend(scr_list)
+
+    def get_revision(self) -> str:
+        if not self._revision:
+            raise RuntimeError("Revision not initialized")
+        return self._revision
 
     @staticmethod
     def load_src_script(src: str) -> str:
