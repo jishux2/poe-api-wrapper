@@ -1,23 +1,21 @@
-import ballyregan
+from dataclasses import dataclass
+from typing import Optional
 
-try:
-    from ballyregan.models import Protocols
+@dataclass
+class ProxyConfig:
+    ip: str
+    port: str
+    protocol: str = "http"  # 默认使用http协议
 
-    PROXY = True
-except:
-    PROXY = False
+    def get_url(self) -> str:
+        return f"{self.protocol}://{self.ip}:{self.port}"
 
-if PROXY:
-
-    def fetch_proxy():
-        http = ballyregan.Proxy(
+def create_v2ray_proxy() -> list[ProxyConfig]:
+    """创建默认的V2rayN代理配置"""
+    return [
+        ProxyConfig(
             ip="127.0.0.1",
             port="10809",
-            protocol=Protocols.HTTP,
+            protocol="http"
         )
-        https = ballyregan.Proxy(
-            ip="127.0.0.1",
-            port="10809",
-            protocol=Protocols.HTTPS,
-        )
-        return [http, https]
+    ]

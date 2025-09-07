@@ -3,11 +3,17 @@ from fastapi.responses import StreamingResponse, ORJSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from daphne.cli import CommandLineInterface
 from typing import Any, Union, AsyncGenerator
+import orjson
+import asyncio
+import random
+import os
+import uuid
+from httpx import AsyncClient
+
 from poe_api_wrapper import AsyncPoeApi
 from poe_api_wrapper.openai import helpers
 from poe_api_wrapper.openai.type import *
-import orjson, asyncio, random, os, uuid
-from httpx import AsyncClient
+from poe_api_wrapper.proxies import ProxyConfig  # 新增导入
 
 # 定义全局变量
 remaining_balance = 0
@@ -19,11 +25,14 @@ app = FastAPI(title="Poe API Wrapper", description="OpenAI Proxy Server")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+# 加载配置文件
 with open(os.path.join(DIR, "secrets.json"), "rb") as f:
-    TOKENS = orjson.loads(f.read())
-    if "tokens" not in TOKENS:
+    config = orjson.loads(f.read())
+    if "tokens" not in config:
         raise Exception("Tokens not found in secrets.json")
-    app.state.tokens = TOKENS["tokens"]
+    app.state.tokens = config["tokens"]
+    # 设置代理配置
+    app.state.proxy = config.get("proxy", {"enabled": False})
 
 with open(os.path.join(DIR, "models.json"), "rb") as f:
     models = orjson.loads(f.read())
@@ -77,13 +86,13 @@ async def chat_completions(request: Request, data: ChatData) -> Union[StreamingR
     
     response = await message_handler(baseModel, text_messages, tokensLimit)
     prompt_tokens = await helpers.__tokenize(''.join([str(message) for message in response["message"]]))
-    if max_tokens and sum((max_tokens, prompt_tokens)) > app.state.models[model]["tokens"]:
-        raise HTTPException(detail={"error": {
-                                        "message": f"This model's maximum context length is {app.state.models[model]['tokens']} tokens. However your request exceeds this limit ({max_tokens} in max_tokens, {prompt_tokens} in messages).", 
-                                        "type": "error", 
-                                        "param": None, 
-                                        "code": 400}
-                                    }, status_code=400)
+    # if max_tokens and sum((max_tokens, prompt_tokens)) > app.state.models[model]["tokens"]:
+    #     raise HTTPException(detail={"error": {
+    #                                     "message": f"This model's maximum context length is {app.state.models[model]['tokens']} tokens. However your request exceeds this limit ({max_tokens} in max_tokens, {prompt_tokens} in messages).", 
+    #                                     "type": "error", 
+    #                                     "param": None, 
+    #                                     "code": 400}
+    #                                 }, status_code=400)
             
     completion_id = await helpers.__generate_completion_id()
     
@@ -312,6 +321,7 @@ async def generate_chunks(
     
     try:
         finish_reason = "stop"
+        initial_balance = remaining_balance
         async for chunk in client.send_message(bot=response["bot"], message=response["message"], file_path=image_urls):
             chunk_token = await helpers.__tokenize(chunk["text"])
             
@@ -328,8 +338,10 @@ async def generate_chunks(
             yield b"data: " + orjson.dumps(content) + b"\n\n"
             await asyncio.sleep(0.001)
             
-        current_conversation_cost = chunk['msgPrice']
-        remaining_balance -= current_conversation_cost
+        # 重新获取剩余额度
+        settings = await client.get_settings()
+        remaining_balance = settings["messagePointInfo"]["messagePointBalance"]
+        current_conversation_cost = initial_balance - remaining_balance
         print(f"本次对话消耗积分: {current_conversation_cost}")
         print(f"当前剩余额度（回复后）: {remaining_balance}")
 
@@ -400,9 +412,24 @@ async def non_streaming_response(
 async def rotate_token(tokens) -> tuple[AsyncPoeApi, bool]:
     global remaining_balance  # 声明使用全局变量
     if len(tokens) == 0:
-        raise HTTPException(detail={"error": {"message": "All tokens have been used. Please add more tokens.", "type": "error", "param": None, "code": 402}}, status_code=402)
+        raise HTTPException(detail={"error": {"message": "All tokens have been used.", "type": "error", "param": None, "code": 402}}, status_code=402)
+    
     token = random.choice(tokens)
-    client = await AsyncPoeApi(token).create()
+    proxy_config = app.state.proxy
+    
+    # 根据配置创建客户端
+    if proxy_config["enabled"]:
+        if proxy_config["auto"]:
+            # 自动使用V2rayN代理
+            client = await AsyncPoeApi(token, auto_proxy=True).create()
+        else:
+            # 使用配置文件中指定的代理
+            proxy = ProxyConfig(**proxy_config["config"])
+            client = await AsyncPoeApi(token, proxy=proxy, auto_proxy=False).create()
+    else:
+        # 不使用代理
+        client = await AsyncPoeApi(token, auto_proxy=False).create()
+    
     settings = await client.get_settings()
     remaining_balance = settings["messagePointInfo"]["messagePointBalance"]
     print(f"当前剩余额度（回复前）: {remaining_balance}")

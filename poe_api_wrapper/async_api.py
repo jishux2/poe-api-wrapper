@@ -1,6 +1,6 @@
 from httpx import AsyncClient, ConnectError, ReadTimeout
 import asyncio, orjson, random, ssl, threading, websocket, string, secrets, os, hashlib, re, aiofiles
-from typing import  AsyncIterator
+from typing import AsyncIterator, Optional
 from loguru import logger
 from requests_toolbelt import MultipartEncoder
 
@@ -20,9 +20,7 @@ from .utils import (
                     )
 from .queries import generate_payload
 from .bundles import PoeBundle
-from .proxies import PROXY
-if PROXY:
-    from .proxies import fetch_proxy
+from .proxies import ProxyConfig, create_v2ray_proxy  # 新增的导入
 
 """
 This API is modified and maintained by @snowby666
@@ -31,77 +29,82 @@ Credit to @ading2210 for the GraphQL queries
 
 
 class AsyncPoeApi:
-    BASE_URL = BASE_URL
-    HEADERS = HEADERS
-    MAX_CONCURRENT_MESSAGES = 3
-    
-    def __init__(self, tokens: dict={}, proxy: list=[], auto_proxy: bool=False):
+    def __init__(self, tokens: dict={}, proxy: Optional[ProxyConfig]=None, auto_proxy: bool=True):
+        """初始化基本属性，但不进行实际的连接操作"""
+        # 基础配置
+        self.BASE_URL = BASE_URL
+        self.HEADERS = HEADERS.copy()
+        self.MAX_CONCURRENT_MESSAGES = 3
+        
+        # 代理相关
+        self.proxy = proxy
+        self.auto_proxy = auto_proxy
+        self.proxies = None
+        
+        # 认证相关
+        self.tokens = tokens
+        self.formkey = ""
+        
+        # WebSocket相关
+        self.ws = None
+        self.ws_connecting = False
+        self.ws_connected = False
+        self.ws_error = False
+        self.ws_domain = None
+        self.tchannel_data = None
+        self.channel_url = None
+        
+        # 消息处理相关
+        self.active_messages = {}
+        self.message_queues = {}
+        self.current_thread = {}
+        self.retry_attempts = 3
+        self.ws_refresh = 3
+        self.groups = {}
+        
+        # 其他组件
         self.client = None
-        # 检查新旧两种认证方式是否至少有一组
-        if not ({'p-b', 'p-lat'}.issubset(tokens) or 
-                {'p-b', 'poe-tchannel-channel'}.issubset(tokens)):
-            raise ValueError("Please provide either p-b + p-lat or p-b + poe-tchannel-channel")
-        
-        self.proxy: list = proxy
-        self.auto_proxy: bool = auto_proxy
-        self.tokens: dict = tokens
-        self.formkey: str = ""
-        self.ws_connecting: bool = False
-        self.ws_connected: bool = False
-        self.ws_error: bool = False
-        self.active_messages: dict[int, str] = {}
-        self.message_queues: dict[int, asyncio.Queue] = {}
-        self.current_thread: dict[str, list] = {}
-        self.retry_attempts: int = 3
-        self.ws_refresh: int = 3
-        self.groups: dict = {}
-        self.proxies: dict = {}
-        self.bundle: PoeBundle = None
-        self.loop: asyncio.AbstractEventLoop = None
-        
-        self.client = AsyncClient(headers=self.HEADERS, timeout=60, http2=True)
-        # 优先使用新的认证方式
-        if 'poe-tchannel-channel' in tokens:
-            self.client.cookies.update({
-                'p-b': tokens['p-b'],
-                'poe-tchannel-channel': tokens['poe-tchannel-channel']
-            })
-        else:
-            self.client.cookies.update({
-                'p-b': tokens['p-b'],
-                'p-lat': tokens['p-lat']
-            })
-        
-          
-        if { '__cf_bm', 'cf_clearance'}.issubset(tokens):
-            self.client.cookies.update({
-                '__cf_bm': tokens['__cf_bm'], 
-                'cf_clearance': tokens['cf_clearance']
-            })
-            
-        if 'formkey' in tokens:
-            self.formkey = tokens['formkey']
-            self.client.headers.update({
-                'Poe-Formkey': self.formkey,
-            })
-        
-        if 'revision' in tokens:  # 新增对revision的处理
-            self.client.headers.update({
-                'Poe-Revision': tokens['revision']
-            })
+        self.bundle = None
+        self.loop = None
 
     async def create(self):
+        """实际建立连接和初始化客户端"""
+        # 1. 初始化HTTP客户端
+        self.client = AsyncClient(
+            headers=self.HEADERS,
+            timeout=60,
+            http2=True
+        )
+        
+        # 2. 设置认证cookies
+        if {'p-b', 'p-lat'}.issubset(self.tokens):
+            self.client.cookies.update({
+                'p-b': self.tokens['p-b'],
+                'p-lat': self.tokens['p-lat']
+            })
+        elif {'p-b', 'poe-tchannel-channel'}.issubset(self.tokens):
+            self.client.cookies.update({
+                'p-b': self.tokens['p-b'],
+                'poe-tchannel-channel': self.tokens['poe-tchannel-channel']
+            })
+        
+        # 3. 设置其他可选cookies
+        if {'__cf_bm', 'cf_clearance'}.issubset(self.tokens):
+            self.client.cookies.update({
+                '__cf_bm': self.tokens['__cf_bm'],
+                'cf_clearance': self.tokens['cf_clearance']
+            })
+            
+        # 4. 加载bundle获取formkey等信息
         await self.load_bundle()
         
-        if self.proxy != [] or self.auto_proxy == True:
-            await self.select_proxy(self.proxy, auto_proxy=self.auto_proxy)
-        elif self.proxy == [] and self.auto_proxy == False:
-            await self.connect_ws() 
+        # 5. 处理代理配置并建立连接
+        if self.auto_proxy or self.proxy:
+            await self.select_proxy()
         else:
-            raise ValueError("Please provide a valid proxy list or set auto_proxy to False")
+            await self.connect_ws()
         
         logger.info("Async instance created")
-
         return self
         
     def __del__(self):
@@ -129,25 +132,31 @@ class AsyncPoeApi:
             logger.error(f"Failed to load bundle. Reason: {e}")
             logger.warning("Failed to get formkey/revision from bundle. Please provide valid values manually." if self.formkey == "" else "Continuing with provided formkey")
         
-    async def select_proxy(self, proxy: list, auto_proxy: bool=False):
-        if proxy == [] and auto_proxy == True:
-            if not PROXY:
-                raise ValueError("Please install ballyregan for auto proxy")
-            proxies = fetch_proxy()
-        elif proxy != [] and auto_proxy == False:
-            proxies = proxy
-        else:
-            raise ValueError("Please provide a valid proxy list or set auto_proxy to False")
-        for p in range(len(proxies)):
-            try:
-                self.proxies = proxies[p]
-                self.client.proxies = self.proxies
-                await self.connect_ws()
-                logger.info(f"Connection established with {proxies[p]}")
-                break
-            except:
-                logger.info(f"Connection failed with {proxies[p]}. Trying {p+1}/{len(proxies)} ...")
-                await asyncio.sleep(1)
+    async def select_proxy(self):
+        """配置代理设置"""
+        try:
+            if self.auto_proxy and not self.proxy:
+                proxies = create_v2ray_proxy()
+                self.proxy = proxies[0]
+            
+            if self.proxy:
+                # 设置HTTP客户端代理
+                proxy_url = self.proxy.get_url()
+                self.client.proxies = {
+                    "http://": proxy_url,
+                    "https://": proxy_url
+                }
+            
+            # 尝试建立连接
+            await self.connect_ws()
+            if self.proxy:
+                logger.info(f"Successfully connected using proxy: {self.proxy.get_url()}")
+            
+        except Exception as e:
+            if self.proxy:
+                logger.error(f"Failed to connect using proxy: {self.proxy.get_url()}")
+                self.client.proxies = None
+            raise ConnectionError(f"Connection failed: {str(e)}")
 
     async def send_request(self, path: str, query_name: str="", variables: dict={}, file_form: list=[], knowledge: bool=False, ratelimit: int = 0):
         if ratelimit > 0:
@@ -248,8 +257,14 @@ class AsyncPoeApi:
             raise RuntimeError(f'Failed to subscribe by sending SubscriptionsMutation. Raw response data: {response_json}')
             
     def ws_run_thread(self):
+        """WebSocket运行线程"""
         if self.ws and not self.ws.sock:
             kwargs = {"sslopt": {"cert_reqs": ssl.CERT_NONE}}
+            # 设置WebSocket代理
+            if self.proxy:
+                kwargs["proxy_type"] = "http"
+                kwargs["http_proxy_host"] = self.proxy.ip
+                kwargs["http_proxy_port"] = int(self.proxy.port)
             try:
                 self.ws.run_forever(**kwargs)
             except Exception as e:
