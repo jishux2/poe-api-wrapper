@@ -179,6 +179,33 @@
         "owned_by": "anthropic"
     },
 
+    "claude-sonnet-4.5-vision": {
+        "baseModel": "claude_sonnet_4_5",
+        "tokens": 200000,
+        "endpoints": ["/v1/chat/completions"],
+        "premium_model": false,
+        "object": "model",
+        "owned_by": "anthropic"
+    },
+
+    "claude-sonnet-4-vision": {
+        "baseModel": "claude_ombre",
+        "tokens": 200000,
+        "endpoints": ["/v1/chat/completions"],
+        "premium_model": false,
+        "object": "model",
+        "owned_by": "anthropic"
+    },
+
+    "claude-3.7-sonnet": {
+        "baseModel": "claude_3_7_sonnet",
+        "tokens": 200000,
+        "endpoints": ["/v1/chat/completions"],
+        "premium_model": false,
+        "object": "model",
+        "owned_by": "anthropic"
+    },
+
     "claude-3.5-sonnet": {
         "baseModel": "claude_3_igloo",
         "tokens": 200000,
@@ -187,7 +214,7 @@
         "object": "model",
         "owned_by": "anthropic"
     },
-    
+
     "claude-3.5-sonnet-200k": {
         "baseModel": "claude_3_igloo_200k",
         "tokens": 200000,
