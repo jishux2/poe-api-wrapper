@@ -112,14 +112,14 @@ class AsyncPoeApi:
             asyncio.get_event_loop().run_until_complete(self.client.aclose())
     
     async def load_bundle(self):
+        """从Poe网站加载bundle并提取认证信息"""
         try:
+            # 获取网站首页
             webData = await self.client.get(self.BASE_URL)
             self.bundle = PoeBundle(webData.text)
             
-            # 获取formkey
+            # 提取formkey和revision
             self.formkey = self.bundle.get_form_key()
-            
-            # 获取revision
             revision = self.bundle.get_revision()
             
             # 更新请求头
@@ -128,9 +128,17 @@ class AsyncPoeApi:
                 'Poe-Revision': revision
             })
             
+            logger.info("Bundle loaded successfully")
+            
         except Exception as e:
-            logger.error(f"Failed to load bundle. Reason: {e}")
-            logger.warning("Failed to get formkey/revision from bundle. Please provide valid values manually." if self.formkey == "" else "Continuing with provided formkey")
+            logger.error(f"Failed to load bundle: {e}")
+            raise RuntimeError(
+                "无法从Poe网站获取必要的认证信息。这可能是因为：\n"
+                "1. 网络连接问题\n"
+                "2. Poe网站结构发生了变化\n"
+                "3. 提供的token已失效\n"
+                "请检查网络连接和token有效性。"
+            ) from e
         
     async def select_proxy(self):
         """配置代理设置"""
