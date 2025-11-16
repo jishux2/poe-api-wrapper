@@ -756,8 +756,25 @@ class AsyncPoeApi:
         await self.delete_queues(chatId)
         self.retry_attempts = 3
         
-    async def send_message(self, bot: str, message: str, chatId: int=None, chatCode: str=None, msgPrice: int=20, file_path: list=[], suggest_replies: bool=False, timeout: int=5) -> AsyncIterator[dict]:
-        self.retry_attempts = 3
+    async def send_message(self, bot: str, message: str, chatId: int=None, chatCode: str=None, 
+                        msgPrice: int=20, file_path: list=[], suggest_replies: bool=False, 
+                        timeout: int=5) -> AsyncIterator[dict]:
+        """发送消息并接收AI的流式响应
+        
+        Args:
+            bot: 机器人标识符
+            message: 消息内容
+            chatId: 会话ID（可选，与chatCode二选一）
+            chatCode: 会话代码（可选，与chatId二选一）
+            msgPrice: 消息点数价格
+            file_path: 附件路径列表
+            suggest_replies: 是否获取建议回复
+            timeout: WebSocket消息超时时间（秒）
+            
+        Yields:
+            包含响应数据的字典，每次yield返回一个增量更新
+        """
+        # 并发控制：等待其他消息发送完成以释放槽位
         timer = 0
         while None in self.active_messages.values() and len(self.active_messages) > self.MAX_CONCURRENT_MESSAGES:
             await asyncio.sleep(0.01)
@@ -765,221 +782,336 @@ class AsyncPoeApi:
             if timer > timeout:
                 raise RuntimeError("Timed out waiting for other messages to send.")
         
+        # 生成临时消息标识符并占位
         prompt_md5 = hashlib.md5((message + generate_nonce()).encode()).hexdigest()
         self.active_messages[prompt_md5] = None
         
+        # 确保WebSocket连接正常
         while self.ws_error:
             await asyncio.sleep(0.01)
         await self.connect_ws()
         
+        # 处理机器人名称映射
         bot = bot_map(bot)
-        attachments = []
         
-        if file_path == []:
-            apiPath = 'gql_POST'
-            file_form = []
-        else:
+        # 准备文件附件
+        attachments = []
+        if file_path:
             apiPath = 'gql_upload_POST'
             file_form, file_size = generate_file(file_path, self.proxies)
             if file_size > 350000000:
                 raise RuntimeError("File size too large. Please try again with a smaller file.")
-            for i in range(len(file_form)):
-                attachments.append(f'file{i}')
-        
-        botInfo = await self.get_botInfo(bot)
-        msgPrice = botInfo.get('displayMessagePointPrice')
-        if not botInfo:
-            raise ValueError(
-                f"Failed to get bot info for {bot}. Make sure the bot exists before creating new chat."
-            )
-        
-        if (chatId == None and chatCode == None):
-            try:
-                variables = {
-                                "chatId": None, 
-                                "bot": bot,
-                                "query":message, 
-                                "shouldFetchChat": True, 
-                                "source":{"sourceType":"chat_input","chatInputMetadata":{"useVoiceRecord":False,}}, 
-                                "clientNonce": generate_nonce(),
-                                "sdid":"",
-                                "attachments":attachments, 
-                                "existingMessageAttachmentsIds":[],
-                                "messagePointsDisplayPrice": msgPrice
-                            }
-                message_data = await self.send_request(apiPath, 'SendMessageMutation', variables, file_form)
-                
-                if message_data["data"] == None and message_data["errors"]:
-                    raise ValueError(
-                        f"Bot {bot} not found. Make sure the bot exists before creating new chat."
-                    )
-                else:
-                    status = message_data['data']['messageEdgeCreate']['status']
-                    if status == 'success' and file_path != []:
-                        for file in file_form:
-                            logger.info(f"File '{file[0]}' uploaded successfully")
-                    elif status == 'unsupported_file_type' and file_path != []:
-                        logger.warning("This file type is not supported. Please try again with a different file.")
-                    elif status == 'reached_limit':
-                        raise RuntimeError(f"Daily limit reached for {bot}.")
-                    elif status == 'too_many_tokens':
-                        raise RuntimeError(f"{message_data['data']['messageEdgeCreate']['statusMessage']}")
-                    elif status in ('rate_limit_exceeded', 'concurrent_messages'):
-                        await self.delete_pending_messages(prompt_md5)
-                        await asyncio.sleep(random.randint(4, 6))
-                        async for chunk in self.send_message(bot, message, chatId, chatCode, msgPrice, file_path, suggest_replies, timeout):
-                            yield chunk
-                        return
-                        
-                    logger.info(f"New Thread created | {message_data['data']['messageEdgeCreate']['chat']['chatCode']}")
-                
-                message_data = message_data['data']['messageEdgeCreate']['chat']
-                chatCode = message_data['chatCode']
-                chatId = message_data['chatId']
-                title = message_data['title']
-                if bot not in self.current_thread:
-                    self.current_thread[bot] = [{'chatId': chatId, 'chatCode': chatCode, 'id': message_data['id'], 'title': message_data['title']}]
-                elif self.current_thread[bot] == []:
-                    self.current_thread[bot] = [{'chatId': chatId, 'chatCode': chatCode, 'id': message_data['id'], 'title': message_data['title']}]
-                else:
-                    self.current_thread[bot].append({'chatId': chatId, 'chatCode': chatCode, 'id': message_data['id'], 'title': message_data['title']})
-                await self.delete_pending_messages(prompt_md5)
-            except Exception as e:
-                await self.delete_pending_messages(prompt_md5)
-                raise e
+            attachments = [f'file{i}' for i in range(len(file_form))]
         else:
-            chatdata = await self.get_threadData(bot, chatCode, chatId)
-            chatCode = chatdata['chatCode']
-            chatId = chatdata['chatId']
-            title = chatdata['title']
-            variables = {
-                            'chatId': chatId, 
-                            'bot': bot, 
-                            'query': message, 
-                            'shouldFetchChat': False, 
-                            'source': { "sourceType": "chat_input", "chatInputMetadata": {"useVoiceRecord": False}}, 
-                            "clientNonce": generate_nonce(), 
-                            'sdid':"", 
-                            'attachments': attachments, 
-                            "existingMessageAttachmentsIds":[],
-                            "messagePointsDisplayPrice": msgPrice
-                        }
+            apiPath = 'gql_POST'
+            file_form = []
+        
+        # 获取机器人信息和消息价格
+        botInfo = await self.get_botInfo(bot)
+        if not botInfo:
+            raise ValueError(f"Failed to get bot info for {bot}. Make sure the bot exists.")
+        msgPrice = botInfo.get('displayMessagePointPrice', msgPrice)
+        
+        # 存储预期的AI回复消息ID，用于过滤WebSocket推送
+        expected_message_id = None
+        
+        try:
+            # 构造GraphQL请求变量的公共部分
+            base_variables = {
+                'bot': bot,
+                'query': message,
+                'shouldFetchChat': True,  # 需要获取完整会话信息以提取messageId
+                'source': {
+                    'sourceType': 'chat_input',
+                    'chatInputMetadata': {'useVoiceRecord': False}
+                },
+                'clientNonce': generate_nonce(),
+                'sdid': '',
+                'attachments': attachments,
+                'existingMessageAttachmentsIds': [],
+                'messagePointsDisplayPrice': msgPrice
+            }
             
-            try:
+            # 根据是否提供chatId/chatCode决定请求方式
+            if chatId is None and chatCode is None:
+                # 创建新会话
+                variables = {**base_variables, 'chatId': None}
                 message_data = await self.send_request(apiPath, 'SendMessageMutation', variables, file_form)
-                    
-                if message_data["data"] == None and message_data["errors"]:
-                    raise RuntimeError(f"An unknown error occurred. Raw response data: {message_data}")
+                
+                # 处理响应状态
+                status = message_data['data']['messageEdgeCreate']['status']
+                if self._handle_message_status(status, file_form, bot, message_data):
+                    # 遇到速率限制，清理占位后递归重试
+                    await self.delete_pending_messages(prompt_md5)
+                    await asyncio.sleep(random.randint(4, 6))
+                    async for chunk in self.send_message(bot, message, chatId, chatCode, msgPrice, file_path, suggest_replies, timeout):
+                        yield chunk
+                    return
+                
+                # 提取会话信息
+                chat_data = message_data['data']['messageEdgeCreate']['chat']
+                chatCode = chat_data['chatCode']
+                chatId = chat_data['chatId']
+                title = chat_data['title']
+                
+                # 从messagesConnection.edges数组末尾提取AI回复的messageId
+                expected_message_id = self._extract_expected_message_id(chat_data)
+                
+                # 保存新会话到线程列表
+                thread_info = {
+                    'chatId': chatId,
+                    'chatCode': chatCode,
+                    'id': chat_data['id'],
+                    'title': title
+                }
+                if bot not in self.current_thread or not self.current_thread[bot]:
+                    self.current_thread[bot] = [thread_info]
                 else:
-                    status = message_data['data']['messageEdgeCreate']['status']
-                    if status == 'success' and file_path != []:
-                        for file in file_form:
-                            logger.info(f"File '{file[0]}' uploaded successfully")
-                    elif status == 'unsupported_file_type' and file_path != []:
-                        logger.warning("This file type is not supported. Please try again with a different file.")
-                    elif status == 'reached_limit':
-                        raise RuntimeError(f"Daily limit reached for {bot}.")
-                    elif status == 'too_many_tokens':
-                        raise RuntimeError(f"{message_data['data']['messageEdgeCreate']['statusMessage']}")
-                    elif status in ('rate_limit_exceeded', 'concurrent_messages'):
-                        await self.delete_pending_messages(prompt_md5)
-                        await asyncio.sleep(random.randint(4, 6))
-                        async for chunk in self.send_message(bot, message, chatId, chatCode, msgPrice, file_path, suggest_replies, timeout):
-                            yield chunk
-                        return
-                        
-                await self.delete_pending_messages(prompt_md5)
-            except Exception as e:
-                await self.delete_pending_messages(prompt_md5)
-                raise e
-                    
+                    self.current_thread[bot].append(thread_info)
+                
+                logger.info(f"New Thread created | {chatCode}")
+            else:
+                # 在现有会话中继续
+                chatdata = await self.get_threadData(bot, chatCode, chatId)
+                chatCode = chatdata['chatCode']
+                chatId = chatdata['chatId']
+                title = chatdata['title']
+                
+                variables = {**base_variables, 'chatId': chatId}
+                message_data = await self.send_request(apiPath, 'SendMessageMutation', variables, file_form)
+                
+                # 处理响应状态
+                status = message_data['data']['messageEdgeCreate']['status']
+                if self._handle_message_status(status, file_form, bot, message_data):
+                    # 遇到速率限制，清理占位后递归重试
+                    await self.delete_pending_messages(prompt_md5)
+                    await asyncio.sleep(random.randint(4, 6))
+                    async for chunk in self.send_message(bot, message, chatId, chatCode, msgPrice, file_path, suggest_replies, timeout):
+                        yield chunk
+                    return
+                
+                # 提取预期的messageId
+                chat_data = message_data['data']['messageEdgeCreate']['chat']
+                expected_message_id = self._extract_expected_message_id(chat_data)
+            
+            # 清理临时占位符
+            await self.delete_pending_messages(prompt_md5)
+            
+        except Exception as e:
+            await self.delete_pending_messages(prompt_md5)
+            raise e
+        
+        if expected_message_id is None:
+            raise RuntimeError("Failed to extract expected messageId from server response")
+        
+        # 注册消息队列，准备接收WebSocket推送
         self.active_messages[chatId] = None
         self.message_queues[chatId] = asyncio.Queue()
-
-        last_text = ""     
-        stateChange = False
-        suggest_attempts = 6
-        response = {}
-        suggestedReplies = []
         
-        while True:
-            try:
-                ws_data = await asyncio.wait_for(self.message_queues[chatId].get(), timeout=timeout)
-            except KeyError:
-                await asyncio.sleep(1)
-                continue
-            except asyncio.TimeoutError:
+        try:
+            # 初始化响应处理状态
+            last_text = ""
+            state_changed = False
+            suggest_attempts = 6 if suggest_replies else 0
+            suggested_replies = []
+            
+            # 主循环：处理WebSocket推送的消息流
+            while True:
                 try:
+                    ws_data = await asyncio.wait_for(
+                        self.message_queues[chatId].get(), 
+                        timeout=timeout
+                    )
+                except KeyError:
+                    # 队列可能被意外清理，短暂等待后重试
+                    await asyncio.sleep(1)
+                    continue
+                except asyncio.TimeoutError:
+                    # 超时重试机制
                     if self.retry_attempts > 0:
                         self.retry_attempts -= 1
                         logger.warning(f"Retrying request {3-self.retry_attempts}/3 times...")
+                        await self.connect_ws()
+                        continue
                     else:
                         self.retry_attempts = 3
-                        await self.delete_queues(chatId)
                         raise RuntimeError("Timed out waiting for response.")
-                    await self.connect_ws()
+                
+                subscription_type = ws_data["subscription"]
+                
+                # 处理消息取消事件
+                if subscription_type == "messageCancelled":
+                    break
+                
+                # 处理标题更新事件
+                if subscription_type == "chatTitleUpdated":
+                    title = ws_data["data"]["chatTitleUpdated"]["title"]
                     continue
-                except Exception as e:
-                    raise e
-            
-            if ws_data["subscription"] == "messageCancelled":
-                break
-            
-            if ws_data["subscription"] == "chatTitleUpdated":
-                title = ws_data["data"]["chatTitleUpdated"]["title"]
-
-            if ws_data["subscription"] == "messageAdded" or title:
-                if ws_data["subscription"] == "messageAdded":
-                    response = ws_data["data"]["messageAdded"]
                 
-                response["chatCode"] = chatCode
-                response["chatId"] = chatId
-                response["title"] = title
-                response["msgPrice"] = msgPrice
-                response["response"] = ""
-                response["suggestedReplies"] = suggestedReplies
-
-                if response["state"] == "error_user_message_too_long":
-                    response["response"]  = "Message too long. Please try again!"
-                    yield response
-                    break
-                
-                if (response["author"] == "pacarana" and response["text"].strip() == last_text.strip()):
-                    response["response"] = ""
-                elif response["author"] == "pacarana" and (last_text == "" or bot != "web-search"):
-                    response["response"] = f'{response["text"]}\n'
-                else:
-                    if stateChange == False:
-                        response["response"] = response["text"]
-                        stateChange = True
+                # 处理消息添加事件
+                if subscription_type == "messageAdded":
+                    message_added = ws_data["data"]["messageAdded"]
+                    current_msg_id = message_added.get("messageId")
+                    
+                    # 过滤非预期消息：排除其他会话或前序请求的残留推送
+                    if current_msg_id != expected_message_id:
+                        logger.warning(f"Skip unexpected messageId={current_msg_id}, expected={expected_message_id}")
+                        continue
+                    
+                    # 构造响应对象
+                    response = {
+                        **message_added,
+                        "chatCode": chatCode,
+                        "chatId": chatId,
+                        "title": title,
+                        "msgPrice": msgPrice,
+                        "response": "",
+                        "suggestedReplies": suggested_replies
+                    }
+                    
+                    # 处理错误状态
+                    state = response.get("state", "")
+                    if state == "error_user_message_too_long":
+                        response["response"] = "Message too long. Please try again!"
+                        yield response
+                        break
+                    elif state == "error_insufficient_fund":
+                        error_msg = response.get("messageStateText", "Insufficient points to send message.")
+                        response["response"] = error_msg
+                        yield response
+                        break
+                    
+                    # 计算增量文本
+                    current_text = response.get("text", "")
+                    if response["author"] == "pacarana" and current_text.strip() == last_text.strip():
+                        # 内容未变化，可能是心跳或状态更新
+                        response["response"] = ""
+                    elif response["author"] == "pacarana" and (not last_text or bot == "web-search"):
+                        # 首次推送或搜索机器人的特殊处理
+                        response["response"] = f'{current_text}\n'
                     else:
-                        response["response"] = response["text"][len(last_text):]                        
-                
-                if response["state"] == "complete":    
-                    if suggest_replies:
-                            
-                        if suggest_attempts > 0 and len(response["followupActions"]) <= 6:
-                            actions = response["followupActions"]
-                            suggestedReplies = [action["bodyText"] for action in actions]
-                            suggest_attempts -= 1     
-                            await asyncio.sleep(1)
-                            continue
+                        # 其他情况都执行增量计算（不限定author）
+                        if not state_changed:
+                            # 第一次状态变化时输出全文
+                            response["response"] = current_text
+                            state_changed = True
+                        else:
+                            # 后续只输出新增部分
+                            response["response"] = current_text[len(last_text):]
+                    
+                    # 处理完成状态
+                    if state == "complete":
+                        # 尝试获取建议回复
+                        if suggest_attempts > 0:
+                            actions = response.get("followupActions", [])
+                            if len(actions) <= 6:
+                                suggested_replies = [action["bodyText"] for action in actions]
+                                suggest_attempts -= 1
+                                await asyncio.sleep(1)
+                                continue
                         
+                        # 更新最终的建议回复并返回
+                        response["suggestedReplies"] = suggested_replies
+                        yield response
+                        break
+                    
                     yield response
-                    break
+                    last_text = current_text
+        
+        finally:
+            # 确保资源清理：即使生成器被提前关闭也会执行
+            await self.delete_queues(chatId)
+            self.retry_attempts = 3
 
-                
-                yield response
-                
-                last_text = response["text"]
+    def _handle_message_status(self, status: str, file_form: list, bot: str, message_data: dict):
+        """处理SendMessageMutation的响应状态
         
-        await self.delete_queues(chatId)
-        self.retry_attempts = 3
+        Returns:
+            bool: 如果遇到速率限制返回True，其他情况返回False
+        """
+        if status == 'success' and file_form:
+            for file in file_form:
+                logger.info(f"File '{file[0]}' uploaded successfully")
+        elif status == 'unsupported_file_type':
+            logger.warning("This file type is not supported. Please try again with a different file.")
+        elif status == 'reached_limit':
+            raise RuntimeError(f"Daily limit reached for {bot}.")
+        elif status == 'too_many_tokens':
+            error_msg = message_data['data']['messageEdgeCreate']['statusMessage']
+            raise RuntimeError(error_msg)
+        elif status in ('rate_limit_exceeded', 'concurrent_messages'):
+            return True  # 标识需要重试
         
-    async def cancel_message(self, chunk: dict):
-        variables = {"messageId": chunk["messageId"], "textLength": len(chunk["text"])}
+        return False  # 正常情况
+
+    def _extract_expected_message_id(self, chat_data: dict) -> int:
+        """从会话数据中提取预期的AI回复消息ID
+        
+        messagesConnection.edges数组的最后一个元素对应服务端新创建的AI回复
+        其他字段（如lastMessage）在不同上下文中指向不稳定，不可依赖
+        
+        Args:
+            chat_data: 会话数据字典
+            
+        Returns:
+            AI回复的messageId，提取失败返回None
+        """
+        if 'messagesConnection' not in chat_data or not chat_data['messagesConnection']:
+            return None
+        
+        edges = chat_data['messagesConnection'].get('edges', [])
+        if not edges:
+            return None
+        
+        last_edge = edges[-1]
+        message_id = last_edge['node']['messageId']
+        logger.info(f"Got expected AI reply messageId: {message_id}")
+        return message_id
+        
+    async def cancel_message(self, chunk: dict = None, messageId: int = None, textLength: int = None):
+        """取消正在生成的消息
+        
+        支持两种调用方式：
+        1. 传入chunk字典（兼容旧版本）：cancel_message(chunk)
+        2. 直接指定参数：cancel_message(messageId=xxx, textLength=xxx)
+        
+        Args:
+            chunk: 消息chunk字典，包含messageId和text字段
+            messageId: 消息ID（与chunk二选一）
+            textLength: 截断位置的文本长度（与chunk二选一）
+        """
+        if chunk is not None:
+            # 兼容旧版接口：从chunk中提取参数
+            messageId = chunk["messageId"]
+            textLength = len(chunk["text"])
+        elif messageId is None or textLength is None:
+            raise ValueError("Must provide either chunk or both messageId and textLength")
+        
+        variables = {"messageId": messageId, "textLength": textLength}
         await self.send_request('gql_POST', 'StopMessage_messageCancel_Mutation', variables)
         
+    async def edit_message(self, message_id: int, new_text: str):
+        """编辑已发送的消息
+        
+        Args:
+            message_id: 要编辑的消息ID
+            new_text: 新的消息内容
+        """
+        variables = {
+            "originalMessageId": message_id,
+            "query": new_text,
+            "source": {
+                "sourceType": "chat_input",
+                "chatInputMetadata": {
+                    "useVoiceRecord": False
+                }
+            },
+            "attachmentsToRemove": [],
+            "attachments": [],
+            "fileHashJwts": []
+        }
+        await self.send_request('gql_POST', 'messageEditing_editMutation', variables)
+
     async def chat_break(self, bot: str, chatId: int=None, chatCode: str=None):
         bot = bot_map(bot)
         chatdata = await self.get_threadData(bot, chatCode, chatId)
