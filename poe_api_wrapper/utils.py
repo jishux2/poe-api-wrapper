@@ -1,4 +1,6 @@
 import os, string, secrets, base64
+import threading
+import json
 from urllib.parse import urlparse
 from httpx import Client
 from loguru import logger
@@ -15,6 +17,9 @@ HEADERS = {
     "Origin": "https://poe.com",
     "Referer": "https://poe.com/",
 }
+
+# 全局锁，保证并发写入时的文件完整性
+_log_file_lock = threading.Lock()
 
 SubscriptionsMutation = {
     "subscriptions":[
@@ -154,3 +159,35 @@ def generate_file(file_path: list, proxy: dict=None):
                 files.append((file_name, file_data, content_type))
                 file_size += len(file_data)
     return files, file_size
+
+def append_to_json_log(log_file: str, data: dict):
+    """以线程安全的方式向JSON数组文件追加数据
+    
+    主要用于记录WebSocket推送等调试信息。由于on_message回调可能并发执行，
+    通过锁机制避免多线程同时读写导致的文件损坏。
+    
+    Args:
+        log_file: 日志文件路径
+        data: 要追加的数据
+    """
+    with _log_file_lock:
+        log_array = []
+        
+        if os.path.exists(log_file):
+            with open(log_file, "r", encoding="utf-8") as f:
+                try:
+                    content = f.read().strip()
+                    if content:
+                        log_array = json.loads(content)
+                        if not isinstance(log_array, list):
+                            logger.warning(f"Log file '{log_file}' is not a JSON array, resetting.")
+                            log_array = []
+                except json.JSONDecodeError as e:
+                    # 高频并发场景下可能读到写入中的不完整JSON
+                    logger.error(f"Failed to parse '{log_file}': {e}, resetting file.")
+                    log_array = []
+        
+        log_array.append(data)
+        
+        with open(log_file, "w", encoding="utf-8") as f:
+            json.dump(log_array, f, ensure_ascii=False, indent=2)

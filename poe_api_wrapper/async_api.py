@@ -16,7 +16,8 @@ from .utils import (
                     REVERSE_BOTS_LIST, 
                     bot_map, 
                     generate_nonce, 
-                    generate_file
+                    generate_file,
+                    append_to_json_log
                     )
 from .queries import generate_payload
 from .bundles import PoeBundle
